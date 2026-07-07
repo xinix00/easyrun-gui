@@ -28,9 +28,29 @@ const app = {
 
     getEndpoint() { return this.connectedEndpoint || this.getConfiguredEndpoint(); },
 
-    authHeaders() {
+    _toHex(buf) {
+        return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    // signHeaders returns the auth header for a request. It signs
+    // HMAC-SHA256(key, METHOD\nPATH\nsha256(body)) so the API key never travels
+    // on the wire — only the signature does. Must match hop's pkg/httputil
+    // scheme exactly. Async because it uses Web Crypto (SubtleCrypto).
+    async signHeaders(method, url, body) {
         const key = this.clusters[this.activeCluster]?.apiKey;
-        return key ? { 'X-API-Key': key } : {};
+        if (!key) return {};
+        const enc = new TextEncoder();
+        const path = new URL(url).pathname;
+        let bodyBytes;
+        if (body == null) bodyBytes = new Uint8Array(0);
+        else if (typeof body === 'string') bodyBytes = enc.encode(body);
+        else bodyBytes = new Uint8Array(body);
+        const bodyHash = this._toHex(await crypto.subtle.digest('SHA-256', bodyBytes));
+        const msg = `${method.toUpperCase()}\n${path}\n${bodyHash}`;
+        const cryptoKey = await crypto.subtle.importKey(
+            'raw', enc.encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+        const sig = await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(msg));
+        return { 'X-Hop-Auth': this._toHex(sig) };
     },
 
     loadClusters() {
@@ -122,15 +142,19 @@ const app = {
     // ── API ────────────────────────────────────────
 
     async fetchAPI(path, options = {}) {
-        const headers = { ...this.authHeaders(), ...(options.headers || {}) };
-        const resp = await fetch(this.getEndpoint() + path, { ...options, headers });
+        const url = this.getEndpoint() + path;
+        const method = options.method || 'GET';
+        const auth = await this.signHeaders(method, url, options.body);
+        const headers = { ...auth, ...(options.headers || {}) };
+        const resp = await fetch(url, { ...options, headers });
         if (!resp.ok) throw new Error(httpStatusMessage(resp.status));
         return resp.status === 204 ? null : resp.json();
     },
 
     async fetchAgentCapacity(agentId, endpoint) {
         try {
-            const resp = await fetch(`${this.getEndpoint()}/v1/agents/${agentId}/capacity`, { headers: this.authHeaders() });
+            const url = `${this.getEndpoint()}/v1/agents/${agentId}/capacity`;
+            const resp = await fetch(url, { headers: await this.signHeaders('GET', url, null) });
             if (resp.ok) this.capacityByEndpoint[endpoint] = await resp.json();
         } catch (e) { /* failed */ }
     },
@@ -215,8 +239,9 @@ const app = {
         this.clusterSSE = abort;
 
         try {
-            const resp = await fetch(endpoint + '/v1/events', {
-                headers: this.authHeaders(), signal: abort.signal
+            const eventsUrl = endpoint + '/v1/events';
+            const resp = await fetch(eventsUrl, {
+                headers: await this.signHeaders('GET', eventsUrl, null), signal: abort.signal
             });
             if (!resp.ok || !resp.body) {
                 // Agent is reachable but returned an error — don't failover,
@@ -617,7 +642,7 @@ const app = {
         output.textContent += `Connecting via leader relay...\n`;
 
         try {
-            const resp = await fetch(url, { headers: this.authHeaders(), signal: abort.signal });
+            const resp = await fetch(url, { headers: await this.signHeaders('GET', url, null), signal: abort.signal });
             if (!resp.ok || !resp.body) { output.textContent += `[Error: HTTP ${resp.status}]\n`; return; }
             output.textContent += '[Connected]\n';
             const reader = resp.body.getReader();
