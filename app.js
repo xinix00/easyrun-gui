@@ -77,12 +77,34 @@ const app = {
     },
 
     _resetState() {
+        // Bump the generation so replies from in-flight requests to the OLD
+        // cluster are dropped instead of repainting stale data after a switch.
+        this._gen = (this._gen || 0) + 1;
         this.agents = [];
         this.status = null;
         this.jobs = [];
         this.capacityByEndpoint = {};
         this.connectedEndpoint = null;
         this._poolIdx = 0;
+        this._renderReset();
+    },
+
+    // _renderReset immediately paints the cleared state, so switching to an
+    // unreachable cluster shows "connecting" instead of the previous cluster's
+    // data frozen on screen.
+    _renderReset() {
+        for (const id of ['agentCount', 'totalPlaced', 'totalJobs', 'leaderAddr']) $(id).textContent = '-';
+        $('lastUpdate').textContent = '';
+        $('statsContainer').classList.remove('settling');
+        $('settleBadge').classList.remove('active');
+        $('error').innerHTML = '';
+        this.setSseStatus(true); // clear any stale SSE banner; connect will repopulate
+        document.querySelector('#agentsTable tbody').innerHTML = '<tr><td colspan="6" class="empty">Connecting to cluster…</td></tr>';
+        document.querySelector('#jobsTable tbody').innerHTML = '<tr><td colspan="6" class="empty">Connecting to cluster…</td></tr>';
+        clearInterval(this.detailTimer);
+        this.activeJobId = null;
+        $('jobDetailView').classList.add('hidden');
+        $('jobsListView').classList.remove('hidden');
     },
 
     switchCluster(index) {
@@ -152,10 +174,14 @@ const app = {
     },
 
     async fetchAgentCapacity(agentId, endpoint) {
+        const gen = this._gen;
         try {
             const url = `${this.getEndpoint()}/v1/agents/${agentId}/capacity`;
             const resp = await fetch(url, { headers: await this.signHeaders('GET', url, null) });
-            if (resp.ok) this.capacityByEndpoint[endpoint] = await resp.json();
+            if (!resp.ok) return;
+            const cap = await resp.json();
+            if (gen !== this._gen) return; // cluster switched while in flight
+            this.capacityByEndpoint[endpoint] = cap;
         } catch (e) { /* failed */ }
     },
 
@@ -308,6 +334,7 @@ const app = {
     // ── Data refresh ───────────────────────────────
 
     async refresh() {
+        const gen = this._gen;
         try {
             $('error').innerHTML = '';
             const [status, jobs, agents, leaderInfo] = await Promise.all([
@@ -316,6 +343,7 @@ const app = {
                 this.fetchAPI('/v1/agents'),
                 this.fetchAPI('/leader')
             ]);
+            if (gen !== this._gen) return; // cluster switched while in flight — drop stale reply
 
             this.agents = agents;
             this.status = status;
@@ -329,26 +357,39 @@ const app = {
             $('statsContainer').classList.toggle('settling', !!status.settling);
             $('settleBadge').classList.toggle('active', !!status.settling);
 
-            for (const a of agents) this.fetchAgentCapacity(a.id, a.endpoint).then(() => this.renderAgentsTable());
+            for (const a of agents) this.fetchAgentCapacity(a.id, a.endpoint).then(() => {
+                if (gen === this._gen) this.renderAgentsTable();
+            });
             this.renderAgentsTable();
             this.renderJobsTable(jobs, status.placed || {}, status.agents);
             if (this.activeJobId) this.refreshJobDetail(this.activeJobId);
 
             $('lastUpdate').textContent = new Date().toLocaleTimeString();
         } catch (err) {
+            if (gen !== this._gen) return; // stale failure from a previous cluster
             $('error').innerHTML = `<div class="warning">Waiting for cluster... (${err.message})</div>`;
         }
     },
 
     // ── Agents table ───────────────────────────────
 
+    // meter renders used/total as a small bar + text (text always shown, color never alone)
+    meter(used, total, text) {
+        if (!total || used == null || isNaN(used)) return text;
+        const pct = Math.min(100, (used / total) * 100);
+        const sev = pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '';
+        return `<span class="usage"><span class="meter${sev}"><span class="meter-fill" style="width:${pct.toFixed(1)}%"></span></span><span class="meter-text">${text}</span></span>`;
+    },
+
     renderAgentsTable() {
         const tbody = document.querySelector('#agentsTable tbody');
         if (!this.agents.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No agents</td></tr>'; return; }
         tbody.innerHTML = [...this.agents].sort((a, b) => a.id.localeCompare(b.id)).map(a => {
             const cap = this.capacityByEndpoint[a.endpoint];
-            const cpu = cap ? `${(cap.cpu_used_shares / 1024).toFixed(1)}/${cap.cpu_cores}` : '-';
-            const mem = cap ? `${this.formatBytes(cap.memory_used_bytes)}/${this.formatBytes(cap.memory_bytes)}` : '-';
+            const cpu = cap ? this.meter(cap.cpu_used_shares, cap.cpu_cores * 1024,
+                `${(cap.cpu_used_shares / 1024).toFixed(1)}/${cap.cpu_cores}`) : '-';
+            const mem = cap ? this.meter(cap.memory_used_bytes, cap.memory_bytes,
+                `${this.formatBytes(cap.memory_used_bytes)}/${this.formatBytes(cap.memory_bytes)}`) : '-';
             const tooltip = cap ? this.formatAttributes(cap.attributes) : '';
             const conn = a.endpoint === this.connectedEndpoint;
             return `<tr>
@@ -535,8 +576,20 @@ const app = {
     },
 
     async refreshJobDetail(jobId) {
-        const job = this.jobs.find(j => j.name === jobId);
-        if (!job) { this.closeJobDetail(); return; }
+        const gen = this._gen;
+        let job = this.jobs.find(j => j.name === jobId);
+        if (!job) {
+            // Deep link on a fresh page: jobs aren't fetched yet. Load them
+            // before concluding the job is gone (closing would bounce the
+            // user back to the list on every direct #jobs/<name> visit).
+            try {
+                const jobs = await this.fetchAPI('/v1/jobs');
+                if (gen !== this._gen) return; // cluster switched mid-flight
+                this.jobs = jobs;
+            } catch (e) { return; } // unreachable — keep "Loading…", refresh() retries
+            job = this.jobs.find(j => j.name === jobId);
+            if (!job) { this.closeJobDetail(); return; }
+        }
 
         // Render info, preserving open/closed state of <details>
         const info = $('jobDetailInfo');
@@ -578,8 +631,8 @@ const app = {
             if (tasks.length && tasks.length === Object.keys(existing).length && tasks.every(t => existing[t.id])) {
                 for (const t of tasks) {
                     const row = existing[t.id];
-                    row.querySelector('.task-cpu').textContent = this.formatPercent(t.cpu_percent);
-                    row.querySelector('.task-mem').textContent = this.formatPercent(t.mem_percent);
+                    row.querySelector('.task-cpu').innerHTML = this.meter(t.cpu_percent, 100, this.formatPercent(t.cpu_percent));
+                    row.querySelector('.task-mem').innerHTML = this.meter(t.mem_percent, 100, this.formatPercent(t.mem_percent));
                     row.querySelector('.task-restarts').textContent = t.restart_count || 0;
                     const s = row.querySelector('.task-state');
                     s.className = 'status task-state ' + t.state;
@@ -590,8 +643,8 @@ const app = {
                     <td data-label="Task"><code>${t.id.slice(0, 8)}</code></td>
                     <td data-label="Agent"><code>${t.agentId}</code></td>
                     <td data-label="Ports">${this.formatPorts(t.ports)}</td>
-                    <td data-label="CPU" class="task-cpu">${this.formatPercent(t.cpu_percent)}</td>
-                    <td data-label="Mem" class="task-mem">${this.formatPercent(t.mem_percent)}</td>
+                    <td data-label="CPU" class="task-cpu">${this.meter(t.cpu_percent, 100, this.formatPercent(t.cpu_percent))}</td>
+                    <td data-label="Mem" class="task-mem">${this.meter(t.mem_percent, 100, this.formatPercent(t.mem_percent))}</td>
                     <td data-label="Restarts" class="task-restarts">${t.restart_count || 0}</td>
                     <td data-label="State"><span class="status task-state ${t.state}">${t.state}</span></td>
                     <td class="mobile-actions"><button class="small" onclick="app.openLogs('${t.id}','${t.agentId}','${t.agentEndpoint}')">Logs</button></td>
