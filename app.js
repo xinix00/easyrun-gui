@@ -10,6 +10,15 @@ function httpStatusMessage(status) {
     }
 }
 
+// withDefaultPort completes a bare host/IP with the agent port. A `?ip=10.0.0.5`
+// would otherwise resolve to :80, which is never where an agent listens.
+function withDefaultPort(addr) {
+    if (/^https?:\/\//i.test(addr)) return addr;                        // already a full URL
+    if (addr.startsWith('[')) return /\]:\d+$/.test(addr) ? addr : addr + ':8080';
+    if ((addr.match(/:/g) || []).length > 1) return `[${addr}]:8080`;    // bare IPv6
+    return /:\d+$/.test(addr) ? addr : addr + ':8080';
+}
+
 const app = {
     clusterSSE: null, refreshTimer: null, detailTimer: null, fallbackTimer: null,
     logAbort: null, currentTask: null, currentStream: 'stdout',
@@ -143,6 +152,26 @@ const app = {
         this._resetState();
         this._poolEndpoints = [];
         this.connectSSE();
+    },
+
+    // prefillFromQuery handles deep links like
+    // gui.gethop.org/?name=NODE&ip=IP — a node's setup page can hand over its
+    // own address and we open the add-cluster form with it filled in. It is
+    // never submitted for the operator, and the API key is deliberately NOT a
+    // parameter: keys don't belong in URLs (history, logs, referrers), so that
+    // one stays something you paste in yourself. Returns true if it opened.
+    prefillFromQuery() {
+        const q = new URLSearchParams(location.search);
+        const name = (q.get('name') || '').trim();
+        const ip = (q.get('ip') || '').trim();
+        if (!name && !ip) return false;
+        this.showAddCluster();
+        $('clusterName').value = name;
+        $('clusterEndpoint').value = ip ? withDefaultPort(ip) : '';
+        $('clusterApiKey').focus();
+        // Drop the params so a reload doesn't re-open the form and invite a duplicate.
+        history.replaceState(null, '', location.pathname + location.hash);
+        return true;
     },
 
     removeCluster(index) {
@@ -783,6 +812,5 @@ if (app.clusters.length) {
     app.connect();
     if (location.hash) app.navigateToHash();
     else history.replaceState(null, '', '#agents');
-} else {
-    app.showAddCluster();
 }
+if (!app.prefillFromQuery() && !app.clusters.length) app.showAddCluster();
