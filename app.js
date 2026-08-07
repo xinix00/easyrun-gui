@@ -410,6 +410,18 @@ const app = {
         return `<span class="usage"><span class="meter${sev}"><span class="meter-fill" style="width:${pct.toFixed(1)}%"></span></span><span class="meter-text">${text}</span></span>`;
     },
 
+    // taskStateLabel toont de startfase-voortgang achter de state: tijdens
+    // "downloading" het percentage uit downloaded_bytes/image_size_bytes, of
+    // alleen de bytes als de image-maat onbekend is — geen nep-percentage.
+    taskStateLabel(t) {
+        if (t.state !== 'downloading' || !t.downloaded_bytes) return t.state;
+        if (t.image_size_bytes) {
+            const pct = Math.min(100, Math.round((t.downloaded_bytes / t.image_size_bytes) * 100));
+            return `${t.state} ${pct}%`;
+        }
+        return `${t.state} ${this.formatBytes(t.downloaded_bytes)}`;
+    },
+
     // formatTemp toont de node-temperatuur uit de heartbeat (temp_milli_c,
     // milligraden — zelfde formaat als `hop agents`); 0/afwezig = geen sensor,
     // en dan hoort er een streepje te staan — geen nep-nul. Kleur is extra,
@@ -677,7 +689,7 @@ const app = {
                     row.querySelector('.task-restarts').textContent = t.restart_count || 0;
                     const s = row.querySelector('.task-state');
                     s.className = 'status task-state ' + t.state;
-                    s.textContent = t.state;
+                    s.textContent = this.taskStateLabel(t);
                 }
             } else {
                 tbody.innerHTML = tasks.length ? tasks.map(t => `<tr data-task-id="${t.id}">
@@ -687,7 +699,7 @@ const app = {
                     <td data-label="CPU" class="task-cpu">${this.meter(t.cpu_percent, 100, this.formatPercent(t.cpu_percent))}</td>
                     <td data-label="Mem" class="task-mem">${this.meter(t.mem_percent, 100, this.formatPercent(t.mem_percent))}</td>
                     <td data-label="Restarts" class="task-restarts">${t.restart_count || 0}</td>
-                    <td data-label="State"><span class="status task-state ${t.state}">${t.state}</span></td>
+                    <td data-label="State"><span class="status task-state ${t.state}">${this.taskStateLabel(t)}</span></td>
                     <td class="mobile-actions"><button class="small" onclick="app.openLogs('${t.id}','${t.agentId}','${t.agentEndpoint}')">Logs</button></td>
                 </tr>`).join('') : '<tr><td colspan="8" class="empty">No tasks</td></tr>';
             }
