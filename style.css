@@ -414,6 +414,12 @@ td:first-child code, #jobsTable td[data-label="Name"] code { color: var(--text);
 .meter.warn { background: rgba(250, 178, 25, 0.16); }
 .meter.crit { background: rgba(208, 59, 59, 0.16); }
 
+/* Node-temperatuur (heartbeat, temp_milli_c) — mono zoals de meter-tekst;
+   warn/crit kleuren mee met de meter-drempels, de waarde staat er altijd. */
+.temp { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+.temp.warn { color: var(--warning); }
+.temp.crit { color: var(--critical-strong); font-weight: 600; }
+
 .meter-text {
     font-family: var(--mono);
     font-size: 11.5px;

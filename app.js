@@ -108,7 +108,7 @@ const app = {
         $('settleBadge').classList.remove('active');
         $('error').innerHTML = '';
         this.setSseStatus(true); // clear any stale SSE banner; connect will repopulate
-        document.querySelector('#agentsTable tbody').innerHTML = '<tr><td colspan="6" class="empty">Connecting to cluster…</td></tr>';
+        document.querySelector('#agentsTable tbody').innerHTML = '<tr><td colspan="7" class="empty">Connecting to cluster…</td></tr>';
         document.querySelector('#jobsTable tbody').innerHTML = '<tr><td colspan="6" class="empty">Connecting to cluster…</td></tr>';
         clearInterval(this.detailTimer);
         this.activeJobId = null;
@@ -410,9 +410,20 @@ const app = {
         return `<span class="usage"><span class="meter${sev}"><span class="meter-fill" style="width:${pct.toFixed(1)}%"></span></span><span class="meter-text">${text}</span></span>`;
     },
 
+    // formatTemp toont de node-temperatuur uit de heartbeat (temp_milli_c,
+    // milligraden — zelfde formaat als `hop agents`); 0/afwezig = geen sensor,
+    // en dan hoort er een streepje te staan — geen nep-nul. Kleur is extra,
+    // nooit de enige drager (zelfde principe als meter()).
+    formatTemp(milliC) {
+        if (!milliC) return '-';
+        const c = milliC / 1000;
+        const sev = c >= 85 ? ' crit' : c >= 70 ? ' warn' : '';
+        return `<span class="temp${sev}">${c.toFixed(1)}°C</span>`;
+    },
+
     renderAgentsTable() {
         const tbody = document.querySelector('#agentsTable tbody');
-        if (!this.agents.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No agents</td></tr>'; return; }
+        if (!this.agents.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No agents</td></tr>'; return; }
         tbody.innerHTML = [...this.agents].sort((a, b) => a.id.localeCompare(b.id)).map(a => {
             const cap = this.capacityByEndpoint[a.endpoint];
             const cpu = cap ? this.meter(cap.cpu_used_shares, cap.cpu_cores * 1024,
@@ -427,6 +438,7 @@ const app = {
                 <td data-label="Endpoint"><code>${a.endpoint}</code>${conn ? ' <span class="connected-dot">●</span>' : ''}</td>
                 <td data-label="CPU">${cpu}</td>
                 <td data-label="Memory">${mem}</td>
+                <td data-label="Temp">${this.formatTemp(a.temp_milli_c)}</td>
                 <td data-label="Tasks">${cap ? cap.tasks_running : '-'}</td>
             </tr>`;
         }).join('');
